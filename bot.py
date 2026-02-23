@@ -13,24 +13,17 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 CALENDARS = [
-    {
-        "url": "https://appointment.mosaicvisa.com/calendar/7",
-        "city": "وهران",
-        "state_file": "state7.json"
-    },
-    {
-        "url": "https://appointment.mosaicvisa.com/calendar/9",
-        "city": "الجزائر",
-        "state_file": "state9.json"
-    }
+    {"url": "https://appointment.mosaicvisa.com/calendar/7", "city": "وهران", "state_file": "state7.json"},
+    {"url": "https://appointment.mosaicvisa.com/calendar/9", "city": "الجزائر", "state_file": "state9.json"}
 ]
 
-CHECK_INTERVAL = 600  # 10 دقائق
+CHECK_INTERVAL = 600  # كل 10 دقائق
 SUB_FILE = "subs.json"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# إدارة المشتركين
 def load_subs() -> Set[int]:
     try:
         with open(SUB_FILE, "r") as f:
@@ -42,23 +35,23 @@ def save_subs(data: Set[int]):
     with open(SUB_FILE, "w") as f:
         json.dump(list(data), f)
 
+# جلب المواعيد
 def fetch(url: str) -> Set[str]:
     try:
         r = requests.get(url, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         rows = soup.find_all("tr")
         dates = set()
-
         for r in rows:
             text = r.get_text(" ", strip=True)
             if "Reserved 0" not in text and any(c.isdigit() for c in text):
                 dates.add(text)
-
         return dates
     except Exception as e:
         logger.error(f"Error fetching {url}: {e}")
         return set()
 
+# إدارة حالة المواعيد
 def load_state(file: str) -> Set[str]:
     try:
         with open(file, "r") as f:
@@ -70,6 +63,7 @@ def save_state(file: str, data: Set[str]):
     with open(file, "w") as f:
         json.dump(list(data), f)
 
+# أوامر البوت
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = load_subs()
     subs.add(update.effective_chat.id)
@@ -82,17 +76,15 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_subs(subs)
     await update.message.reply_text("تم إلغاء الاشتراك ❌")
 
+# المهمة الدورية
 async def check_loop(app: Application):
     while True:
         subs = load_subs()
-        if not subs:
-            logger.info("لا يوجد مشتركين حالياً، تخطي الإشعارات.")
-        else:
+        if subs:
             for cal in CALENDARS:
                 current = fetch(cal["url"])
                 old = load_state(cal["state_file"])
                 new = current - old
-
                 if new:
                     msg = f"مواعيد جديدة في {cal['city']}:\n" + "\n".join(sorted(new))
                     for chat_id in subs:
@@ -101,18 +93,17 @@ async def check_loop(app: Application):
                         except Exception as e:
                             logger.error(f"فشل إرسال الرسالة إلى {chat_id}: {e}")
                     save_state(cal["state_file"], current)
-                else:
-                    logger.info(f"لا توجد مواعيد جديدة في {cal['city']}.")
-
+        else:
+            logger.info("لا يوجد مشتركين، تخطي الإشعارات.")
         await asyncio.sleep(CHECK_INTERVAL)
 
+# تشغيل البوت
 async def main():
     if not BOT_TOKEN:
         logger.error("الرجاء تعيين متغير البيئة BOT_TOKEN قبل التشغيل.")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
 
@@ -125,13 +116,9 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     import sys
-
     try:
         asyncio.run(main())
     except RuntimeError as e:
-        if "asyncio.run() cannot be called from a running event loop" in str(e):
-            # بيئات مثل Render أو Jupyter قد تكون تستخدم event loop مفعّل مسبقاً
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(main())
-        else:
-            raise
+        # حل مشكلة loop موجود مسبقًا في Render
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
