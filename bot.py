@@ -124,4 +124,14 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    import sys
+
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            # بيئات مثل Render أو Jupyter قد تكون تستخدم event loop مفعّل مسبقاً
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(main())
+        else:
+            raise
