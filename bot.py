@@ -1,171 +1,127 @@
-"""
-Telegram Bot for Mosaic Visa Appointment Notifier (Oran & Algiers)
-"""
-
 import json
 import logging
 import asyncio
 import os
 from datetime import datetime
-from typing import Dict, Set
+from typing import Set
 
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ======================== CONFIGURATION ========================
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # ضع التوكن كمتغير بيئة
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 CALENDARS = [
     {
         "url": "https://appointment.mosaicvisa.com/calendar/7",
-        "city": "وهران (Oran)",
-        "state_file": "last_state_7.json"
+        "city": "وهران",
+        "state_file": "state7.json"
     },
     {
         "url": "https://appointment.mosaicvisa.com/calendar/9",
-        "city": "الجزائر (Algiers)",
-        "state_file": "last_state_9.json"
+        "city": "الجزائر",
+        "state_file": "state9.json"
     }
 ]
 
-CHECK_INTERVAL_SECONDS = 600
-SUBSCRIBERS_FILE = "subscribers.json"
+CHECK_INTERVAL = 600  # 10 دقائق
+SUB_FILE = "subs.json"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ======================== SUBSCRIBERS ========================
-
-def load_subscribers() -> Set[int]:
+def load_subs() -> Set[int]:
     try:
-        with open(SUBSCRIBERS_FILE, "r") as f:
-            return set(json.load(f).get("chat_ids", []))
+        with open(SUB_FILE, "r") as f:
+            return set(json.load(f))
     except:
         return set()
 
-def save_subscribers(chat_ids: Set[int]):
-    with open(SUBSCRIBERS_FILE, "w") as f:
-        json.dump({"chat_ids": list(chat_ids)}, f)
+def save_subs(data: Set[int]):
+    with open(SUB_FILE, "w") as f:
+        json.dump(list(data), f)
 
-# ======================== FETCH ========================
-
-def fetch_appointments(url: str) -> Set[str]:
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
+def fetch(url: str) -> Set[str]:
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
+        r = requests.get(url, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
-
-        available = set()
-
         rows = soup.find_all("tr")
+        dates = set()
 
-        for row in rows:
-            text = row.get_text(" ", strip=True)
+        for r in rows:
+            text = r.get_text(" ", strip=True)
+            if "Reserved 0" not in text and any(c.isdigit() for c in text):
+                dates.add(text)
 
-            if "Reserved 0" not in text and any(char.isdigit() for char in text):
-                available.add(text)
-
-        return available
-
+        return dates
     except Exception as e:
         logger.error(f"Error fetching {url}: {e}")
         return set()
 
-# ======================== STATE ========================
-
-def load_state(path: str) -> Set[str]:
+def load_state(file: str) -> Set[str]:
     try:
-        with open(path, "r") as f:
-            return set(json.load(f).get("dates", []))
+        with open(file, "r") as f:
+            return set(json.load(f))
     except:
         return set()
 
-def save_state(path: str, dates: Set[str]):
-    with open(path, "w") as f:
-        json.dump({
-            "dates": list(dates),
-            "updated": datetime.now().isoformat()
-        }, f)
-
-# ======================== COMMANDS ========================
+def save_state(file: str, data: Set[str]):
+    with open(file, "w") as f:
+        json.dump(list(data), f)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    subs = load_subscribers()
-
-    if chat_id not in subs:
-        subs.add(chat_id)
-        save_subscribers(subs)
-        await update.message.reply_text("✅ تم الاشتراك في الإشعارات.")
-    else:
-        await update.message.reply_text("أنت مشترك بالفعل.")
+    subs = load_subs()
+    subs.add(update.effective_chat.id)
+    save_subs(subs)
+    await update.message.reply_text("تم الاشتراك ✅")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    subs = load_subscribers()
-
-    if chat_id in subs:
-        subs.remove(chat_id)
-        save_subscribers(subs)
-        await update.message.reply_text("❌ تم إلغاء الاشتراك.")
-    else:
-        await update.message.reply_text("لم تكن مشتركاً.")
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 البوت يعمل ويراقب المواعيد.")
-
-# ======================== CHECKER ========================
+    subs = load_subs()
+    subs.discard(update.effective_chat.id)
+    save_subs(subs)
+    await update.message.reply_text("تم إلغاء الاشتراك ❌")
 
 async def check_loop(app: Application):
     while True:
-        logger.info("Checking appointments...")
-        subs = load_subscribers()
-
-        if subs:
+        subs = load_subs()
+        if not subs:
+            logger.info("لا يوجد مشتركين حالياً، تخطي الإشعارات.")
+        else:
             for cal in CALENDARS:
-                current = fetch_appointments(cal["url"])
+                current = fetch(cal["url"])
                 old = load_state(cal["state_file"])
+                new = current - old
 
-                new_dates = current - old
-
-                if new_dates:
-                    msg = (
-                        f"📅 مواعيد جديدة في {cal['city']}\n"
-                        f"{', '.join(sorted(new_dates))}\n"
-                        f"{cal['url']}"
-                    )
-
+                if new:
+                    msg = f"مواعيد جديدة في {cal['city']}:\n" + "\n".join(sorted(new))
                     for chat_id in subs:
-                        await app.bot.send_message(chat_id, msg)
-
+                        try:
+                            await app.bot.send_message(chat_id, msg)
+                        except Exception as e:
+                            logger.error(f"فشل إرسال الرسالة إلى {chat_id}: {e}")
                     save_state(cal["state_file"], current)
+                else:
+                    logger.info(f"لا توجد مواعيد جديدة في {cal['city']}.")
 
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        await asyncio.sleep(CHECK_INTERVAL)
 
-# ======================== MAIN ========================
-
-def main():
+async def main():
     if not BOT_TOKEN:
-        print("ضع BOT_TOKEN كمتغير بيئة")
+        logger.error("الرجاء تعيين متغير البيئة BOT_TOKEN قبل التشغيل.")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("status", status))
 
-    app.job_queue.run_once(lambda ctx: asyncio.create_task(check_loop(app)), 1)
+    # بدء المهمة الدورية
+    app.create_task(check_loop(app))
 
-    print("Bot running...")
-    app.run_polling()
+    logger.info("البوت يعمل الآن...")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
